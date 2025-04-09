@@ -8,13 +8,22 @@ import fitz  # PyMuPDF
 import textract
 from openai import OpenAI
 from fpdf import FPDF  # Для генерации PDF с поддержкой кириллицы
-
+from langdetect import detect_langs
 
 # === Загрузка переменных окружения ===
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
+
+def detect_main_language(text1, text2):
+    combined_text = text1 + " " + text2
+    langs = detect_langs(combined_text)
+    lang_scores = {lang.lang: lang.prob for lang in langs}
+    ru_score = lang_scores.get('ru', 0)
+    en_score = lang_scores.get('en', 0)
+    return 'ru' if ru_score > en_score else 'en'
+
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 user_files = {}
@@ -38,7 +47,10 @@ def extract_text_from_doc(file_path):
 
 # === GPT-сравнение ===
 def ask_openai_to_compare(text1, text2):
-    prompt = f"""Сравни два технических документа. Выведи список параметров, где:
+    lang = detect_main_language(text1, text2)
+
+    if lang == 'ru':
+        prompt = f"""Сравни два технических документа. Выведи список параметров, где:
 1. Есть совпадения.
 2. Есть различия.
 3. Укажи названия параметров, значения в первом и втором документе.
@@ -50,6 +62,20 @@ def ask_openai_to_compare(text1, text2):
 Документ 2:
 {text2}
 """
+    else:
+        prompt = f"""Compare the following two technical documents. Provide a list of:
+1. Parameters with similarities.
+2. Parameters with differences.
+3. Names of the parameters, values in the first and second document.
+4. Format the result as a report or table.
+
+Document 1:
+{text1}
+
+Document 2:
+{text2}
+"""
+
     try:
         response = client.chat.completions.create(
             model="gpt-4",
@@ -59,12 +85,12 @@ def ask_openai_to_compare(text1, text2):
         )
         return response.choices[0].message.content
     except Exception as e:
-        raise Exception(f"Ошибка OpenAI: {e}")
-
+        raise Exception(f"Error OpenAI: {e}")
+    
 # === Сохранение в разных форматах ===
 def save_docx_from_text(text):
     doc = Document()
-    doc.add_heading("Сравнительный анализ ИИ", 0)
+    doc.add_heading("Comparative analysis of AI", 0)
     for line in text.splitlines():
         doc.add_paragraph(line)
     result_path = tempfile.NamedTemporaryFile(delete=False, suffix='.docx').name
@@ -90,7 +116,7 @@ def save_pdf_from_text(text):
     font_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'MyDejaVuSans.ttf'))
 
     if not os.path.exists(font_path):
-        raise FileNotFoundError(f"Файл шрифта не найден: {font_path}")
+        raise FileNotFoundError(f"Font file not found: {font_path}")
 
     # print(f"Путь к шрифту: {font_path}")
     
@@ -103,7 +129,7 @@ def save_pdf_from_text(text):
             try:
                 os.remove(file)
             except Exception as e:
-                print(f"Не удалось удалить кэш-файл {file}: {e}")
+                print(f"Failed to delete the cache file: {file}: {e}")
 
     # === Регистрация шрифта ===
     pdf.add_font("MyDejaVu", "", font_path, uni=True)
@@ -117,19 +143,19 @@ def save_pdf_from_text(text):
 # ==================================================================================================
 # === Команды Telegram ===
 def start(update: Update, context: CallbackContext):
-    update.message.reply_text("Привет! Пришли два файла (PDF, DOCX, DOC или TXT). Сначала первый (эталон), потом второй (для сравнения).")
+    update.message.reply_text("Hello! Please send two files (PDF, DOCX, DOC, or TXT). First the reference file, then the second one for comparison.")
 
 def stop(update: Update, context: CallbackContext):
     global updater
     user_id = update.message.from_user.id
 
     if user_id == ADMIN_ID:
-        update.message.reply_text("Бот завершает работу.")
+        update.message.reply_text("The bot is shutting down.")
         if updater:
             updater.stop()
             updater.is_idle = False
     else:
-        update.message.reply_text("У вас нет прав для остановки бота.")
+        update.message.reply_text("You do not have permission to stop the bot.")
 
 # === Обработка файлов ===
 def handle_file(update: Update, context: CallbackContext):
@@ -153,20 +179,20 @@ def handle_file(update: Update, context: CallbackContext):
         elif file_ext == '.txt':
             text = extract_text_from_txt(temp_path)
         else:
-            update.message.reply_text("Формат не поддерживается. Отправь PDF, DOCX, DOC или TXT.")
+            update.message.reply_text("The format is not supported. Please send PDF, DOCX, DOC, or TXT.")
             os.remove(temp_path)
             return
     except Exception as e:
-        update.message.reply_text(f"Ошибка при чтении файла: {e}")
+        update.message.reply_text(f"Error reading the file: {e}")
         os.remove(temp_path)
         return
 
     user_files[user_id].append((temp_path, text))
-    update.message.reply_text(f"Файл {len(user_files[user_id])} получен.")
+    update.message.reply_text(f"File {len(user_files[user_id])} received.")
 
     if len(user_files[user_id]) == 2:
         (_, text1), (_, text2) = user_files[user_id]
-        update.message.reply_text("Анализирую документы...")
+        update.message.reply_text("Analyzing documents...")
 
         try:
             result_text = ask_openai_to_compare(text1, text2)
@@ -174,15 +200,15 @@ def handle_file(update: Update, context: CallbackContext):
             update.message.reply_text(str(e))
             return
 
-        update.message.reply_text("Анализ завершён. Отправляю результат в форматах DOCX, PDF и TXT...")
+        update.message.reply_text("Analysis completed. Sending the results in DOCX, PDF, and TXT formats...")
 
         docx_path = save_docx_from_text(result_text)
         txt_path = save_txt_from_text(result_text)
         pdf_path = save_pdf_from_text(result_text)
 
-        update.message.reply_document(open(docx_path, "rb"), filename="Сравнение_ИИ.docx")
-        update.message.reply_document(open(txt_path, "rb"), filename="Сравнение_ИИ.txt")
-        update.message.reply_document(open(pdf_path, "rb"), filename="Сравнение_ИИ.pdf")
+        update.message.reply_document(open(docx_path, "rb"), filename="Comparison_AI.docx")
+        update.message.reply_document(open(txt_path, "rb"), filename="Comparison_AI.txt")
+        update.message.reply_document(open(pdf_path, "rb"), filename="Comparison_AI.pdf")
 
         # Очистка
         for f, _ in user_files.get(user_id, []):
